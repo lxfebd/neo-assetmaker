@@ -306,7 +306,8 @@ def run_cxfreeze(skip_flasher=False):
         "build_exe": BUILD_DIR,
     }
 
-    base = "Win32GUI" if sys.platform == "win32" else None
+    # 对于 cx_Freeze 8.5.3 与 Python 3.13 兼容性问题，使用 None 作为 base
+    base = None
     original_argv = sys.argv
     sys.argv = [sys.argv[0], "build"]
 

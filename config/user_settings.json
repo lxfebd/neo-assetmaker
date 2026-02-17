@@ -1,0 +1,20 @@
+{
+  "auto_update": true,
+  "update_freq": "每天",
+  "font_size": "大",
+  "theme": "默认",
+  "theme_color": "#ffaa7f",
+  "theme_image": "C:/Users/31672/Desktop/4AFB870CB69FF24073D2E4D9B860F4A3.jpg",
+  "scale": 1.0,
+  "language": "简体中文",
+  "auto_create_temp_project": true,
+  "show_welcome_dialog": true,
+  "show_status_bar": true,
+  "auto_save": true,
+  "preview_quality": "高",
+  "hardware_acceleration": true,
+  "export_quality": "高",
+  "export_threads": 1,
+  "github_acceleration": true,
+  "use_proxy": false
+}

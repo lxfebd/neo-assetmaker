@@ -8,6 +8,7 @@ import subprocess
 import time
 import threading
 import hashlib
+import shutil
 import requests
 from typing import Optional, Dict, Any
 
@@ -112,6 +113,23 @@ class FlasherWorker(QThread):
         test_file = os.path.join(bin_dir, "xfel.exe")
         if not os.path.exists(test_file):
             raise Exception(f"烧录工具不完整，请确保epass_flasher目录包含所有必要文件")
+        
+        # 检查是否为占位符版本
+        try:
+            with open(test_file, 'r', encoding='utf-8') as f:
+                content = f.read()
+                if '占位符版本' in content or 'placeholder' in content.lower():
+                    raise Exception(
+                        "当前使用的是epass_flasher占位符版本，无法执行实际的烧录操作。\n\n"
+                        "如需使用完整的固件烧录功能，请执行以下步骤之一：\n"
+                        "1. 手动克隆子模块：git clone https://github.com/rhodesepass/epass_flasher.git epass_flasher\n"
+                        "2. 初始化Git子模块：git submodule update --init --recursive\n\n"
+                        "详细说明请查看 epass_flasher/README.md"
+                    )
+        except Exception as e:
+            if '占位符版本' in str(e):
+                raise
+            # 如果读取失败，可能是真正的exe文件，继续执行
         
         # 1. 获取manifest
         self.status_updated.emit("获取固件信息...")
@@ -460,6 +478,12 @@ class FlasherDialog(QDialog):
         button_layout.addWidget(self.cancel_button)
         button_layout.addStretch()
         
+        # 添加更新固件按钮
+        self.update_firmware_button = QPushButton("更新固件")
+        self.update_firmware_button.setStyleSheet("background-color: #2196F3; color: white; padding: 10px 20px;")
+        self.update_firmware_button.clicked.connect(self._on_update_firmware)
+        button_layout.insertWidget(4, self.update_firmware_button)
+        
         layout.addLayout(button_layout)
         
         # 工作线程
@@ -480,9 +504,11 @@ class FlasherDialog(QDialog):
                 self, 
                 "提示", 
                 "epass_flasher目录不存在，固件烧录功能暂不可用。\n\n"
-                "如果您需要使用固件烧录功能，请确保项目完整并包含epass_flasher子模块。\n"
-                "您可以手动克隆该子模块：\n"
-                "git clone https://github.com/rhodesepass/epass_flasher.git epass_flasher"
+                "当前使用的是占位符版本，无法执行实际的烧录操作。\n\n"
+                "如需使用完整的固件烧录功能，请执行以下步骤之一：\n"
+                "1. 手动克隆子模块：git clone https://github.com/rhodesepass/epass_flasher.git epass_flasher\n"
+                "2. 初始化Git子模块：git submodule update --init --recursive\n\n"
+                "详细说明请查看 epass_flasher/README.md"
             )
             return
         
@@ -579,9 +605,11 @@ class FlasherDialog(QDialog):
                     self, 
                     "提示", 
                     "epass_flasher目录不存在，固件烧录功能暂不可用。\n\n"
-                    "如果您需要使用固件烧录功能，请确保项目完整并包含epass_flasher子模块。\n"
-                    "您可以手动克隆该子模块：\n"
-                    "git clone https://github.com/rhodesepass/epass_flasher.git epass_flasher"
+                    "当前使用的是占位符版本，无法执行实际的烧录操作。\n\n"
+                    "如需使用完整的固件烧录功能，请执行以下步骤之一：\n"
+                    "1. 手动克隆子模块：git clone https://github.com/rhodesepass/epass_flasher.git epass_flasher\n"
+                    "2. 初始化Git子模块：git submodule update --init --recursive\n\n"
+                    "详细说明请查看 epass_flasher/README.md"
                 )
                 return
             
@@ -665,9 +693,11 @@ class FlasherDialog(QDialog):
                     self, 
                     "提示", 
                     "epass_flasher目录不存在，固件烧录功能暂不可用。\n\n"
-                    "如果您需要使用固件烧录功能，请确保项目完整并包含epass_flasher子模块。\n"
-                    "您可以手动克隆该子模块：\n"
-                    "git clone https://github.com/rhodesepass/epass_flasher.git epass_flasher"
+                    "当前使用的是占位符版本，无法执行实际的烧录操作。\n\n"
+                    "如需使用完整的固件烧录功能，请执行以下步骤之一：\n"
+                    "1. 手动克隆子模块：git clone https://github.com/rhodesepass/epass_flasher.git epass_flasher\n"
+                    "2. 初始化Git子模块：git submodule update --init --recursive\n\n"
+                    "详细说明请查看 epass_flasher/README.md"
                 )
                 return
             
@@ -701,6 +731,319 @@ class FlasherDialog(QDialog):
         except Exception as e:
             self.status_text.append(f"驱动安装失败: {str(e)}")
             QMessageBox.critical(self, "错误", f"驱动安装失败:\n{str(e)}")
+    
+    def _on_update_firmware(self):
+        """更新固件到最新版本"""
+        try:
+            # 确认更新
+            reply = QMessageBox.question(
+                self, 
+                "确认更新", 
+                "确定要更新固件到最新版本吗？\n\n"
+                "更新将从GitHub下载最新的epass_flasher模块。\n"
+                "更新过程可能需要几分钟时间，请确保网络连接正常。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+            
+            # 禁用按钮
+            self.update_firmware_button.setEnabled(False)
+            self.status_text.clear()
+            self.status_text.append("=== 开始更新固件 ===")
+            
+            # 创建更新线程
+            self.update_worker = FirmwareUpdateWorker(self.flasher_dir)
+            self.update_worker.progress_updated.connect(self._on_update_progress)
+            self.update_worker.status_updated.connect(self._on_update_status)
+            self.update_worker.error_occurred.connect(self._on_update_error)
+            self.update_worker.finished.connect(self._on_update_finished)
+            self.update_worker.start()
+            
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"更新失败: {str(e)}")
+            self.update_firmware_button.setEnabled(True)
+    
+    def _on_update_progress(self, message, progress):
+        """更新进度"""
+        self.status_text.append(message)
+        self.progress_bar.setValue(progress)
+    
+    def _on_update_status(self, message):
+        """更新状态"""
+        self.status_text.append(message)
+        self.status_text.verticalScrollBar().setValue(self.status_text.verticalScrollBar().maximum())
+    
+    def _on_update_error(self, error):
+        """更新错误"""
+        self.status_text.append(f"错误: {error}")
+        self.status_text.append("更新失败")
+        self.update_firmware_button.setEnabled(True)
+        QMessageBox.critical(self, "错误", f"更新失败: {error}")
+    
+    def _on_update_finished(self):
+        """更新完成"""
+        self.status_text.append("=== 更新完成 ===")
+        self.status_text.append("固件已更新到最新版本！")
+        self.progress_bar.setValue(100)
+        self.update_firmware_button.setEnabled(True)
+        QMessageBox.information(self, "完成", "固件已成功更新到最新版本！")
+
+class FirmwareUpdateWorker(QThread):
+    """固件更新工作线程"""
+    
+    progress_updated = pyqtSignal(str, int)
+    status_updated = pyqtSignal(str)
+    error_occurred = pyqtSignal(str)
+    finished = pyqtSignal()
+    
+    def __init__(self, flasher_dir: str):
+        super().__init__()
+        self.flasher_dir = flasher_dir
+        self.bin_path = os.path.join(flasher_dir, "bin")
+        self.is_running = True
+    
+    def run(self):
+        try:
+            self.status_updated.emit("正在检查当前版本...")
+            time.sleep(1)
+            
+            # 备份当前bin目录
+            backup_bin = os.path.join(self.flasher_dir, 'bin_backup')
+            current_bin = os.path.join(self.flasher_dir, 'bin')
+            
+            if os.path.exists(current_bin):
+                self.status_updated.emit("备份当前版本...")
+                if os.path.exists(backup_bin):
+                    shutil.rmtree(backup_bin)
+                shutil.copytree(current_bin, backup_bin)
+                self.progress_updated.emit("备份完成", 20)
+            
+            # 克隆最新版本（带重试机制）
+            self.status_updated.emit("正在从GitHub下载最新版本...")
+            temp_path = os.path.join(os.path.dirname(self.flasher_dir), 'epass_flasher_temp')
+            
+            if os.path.exists(temp_path):
+                shutil.rmtree(temp_path)
+            
+            # 多个镜像源尝试
+            mirrors = [
+                'https://github.com/rhodesepass/epass_flasher.git',
+                'https://hub.nuaa.cf/rhodesepass/epass_flasher.git',
+                'https://kkgithub.com/rhodesepass/epass_flasher.git',
+                'https://kgithub.com/rhodesepass/epass_flasher.git',
+                'https://gitclone.com/github.com/rhodesepass/epass_flasher.git'
+            ]
+            
+            clone_success = False
+            last_error = ""
+            
+            for attempt, mirror_url in enumerate(mirrors):
+                if not self.is_running:
+                    break
+                
+                self.status_updated.emit(f"尝试连接镜像源 {attempt + 1}/{len(mirrors)}...")
+                
+                clone_cmd = [
+                    'git', 'clone',
+                    '--depth', '1',
+                    mirror_url,
+                    temp_path
+                ]
+                
+                result = subprocess.run(clone_cmd, capture_output=True, text=True)
+                
+                if result.returncode == 0:
+                    clone_success = True
+                    self.status_updated.emit(f"镜像源 {attempt + 1} 连接成功！")
+                    break
+                else:
+                    last_error = result.stderr
+                    self.status_updated.emit(f"镜像源 {attempt + 1} 连接失败，尝试下一个...")
+                    time.sleep(2)
+            
+            if not clone_success:
+                raise Exception(
+                    f"所有镜像源连接失败，请检查网络连接。\n\n"
+                    f"最后错误信息: {last_error}\n\n"
+                    f"建议解决方案:\n"
+                    f"1. 检查网络连接是否正常\n"
+                    f"2. 尝试使用VPN或代理\n"
+                    f"3. 稍后重试"
+                )
+            
+            self.progress_updated.emit("下载完成", 60)
+            
+            # 更新bin目录
+            self.status_updated.emit("正在更新bin目录...")
+            source_bin = os.path.join(temp_path, 'bin')
+            
+            if os.path.exists(source_bin):
+                # 删除旧的bin目录内容
+                for item in os.listdir(current_bin):
+                    item_path = os.path.join(current_bin, item)
+                    try:
+                        if os.path.isfile(item_path):
+                            os.remove(item_path)
+                        else:
+                            shutil.rmtree(item_path)
+                    except Exception as e:
+                        self.status_updated.emit(f"删除失败 {item}: {e}")
+                
+                # 复制新文件
+                for item in os.listdir(source_bin):
+                    src = os.path.join(source_bin, item)
+                    dst = os.path.join(current_bin, item)
+                    
+                    if os.path.isfile(src):
+                        shutil.copy2(src, dst)
+                    else:
+                        shutil.copytree(src, dst, dirs_exist_ok=True)
+                
+                self.progress_updated.emit("bin目录更新完成", 80)
+            
+            # 更新其他文件
+            self.status_updated.emit("正在更新其他文件...")
+            for item in os.listdir(temp_path):
+                if item in ['bin', '.git']:
+                    continue
+                    
+                src = os.path.join(temp_path, item)
+                dst = os.path.join(self.flasher_dir, item)
+                
+                if os.path.isfile(src):
+                    shutil.copy2(src, dst)
+                elif os.path.isdir(src):
+                    if os.path.exists(dst):
+                        shutil.rmtree(dst)
+                    shutil.copytree(src, dst, dirs_exist_ok=True)
+            
+            self.progress_updated.emit("文件更新完成", 90)
+            
+            # 清理临时目录（使用多种方法）
+            self.status_updated.emit("正在清理临时文件...")
+            self._cleanup_temp_directory(temp_path)
+            
+            # 检查关键文件
+            xfel_path = os.path.join(current_bin, 'xfel.exe')
+            if not os.path.exists(xfel_path):
+                raise Exception("更新后xfel.exe不存在")
+            
+            self.status_updated.emit("更新成功！")
+            self.finished.emit()
+            
+        except Exception as e:
+            self.error_occurred.emit(str(e))
+    
+    def stop(self):
+        self.is_running = False
+    
+    def _cleanup_temp_directory(self, temp_path):
+        """清理临时目录，使用多种方法确保删除成功"""
+        if not os.path.exists(temp_path):
+            self.progress_updated.emit("清理完成", 100)
+            return
+        
+        cleanup_methods = [
+            ("方法1: 标准删除", self._cleanup_standard),
+            ("方法2: 强制删除", self._cleanup_force),
+            ("方法3: 递归删除", self._cleanup_recursive),
+            ("方法4: 命令行删除", self._cleanup_command)
+        ]
+        
+        for method_name, method_func in cleanup_methods:
+            if not os.path.exists(temp_path):
+                break
+                
+            try:
+                self.status_updated.emit(f"正在清理（{method_name}）...")
+                method_func(temp_path)
+                
+                if not os.path.exists(temp_path):
+                    self.status_updated.emit(f"{method_name}成功！")
+                    self.progress_updated.emit("清理完成", 100)
+                    return
+            except Exception as e:
+                self.status_updated.emit(f"{method_name}失败: {e}")
+                time.sleep(1)
+        
+        # 如果所有方法都失败，使用计划任务延迟删除
+        if os.path.exists(temp_path):
+            self.status_updated.emit("所有方法失败，创建延迟删除任务...")
+            self._schedule_cleanup(temp_path)
+            self.status_updated.emit("临时文件将在下次重启时自动删除")
+            self.progress_updated.emit("清理完成", 100)
+        else:
+            self.progress_updated.emit("清理完成", 100)
+    
+    def _cleanup_standard(self, temp_path):
+        """标准删除方法"""
+        shutil.rmtree(temp_path)
+    
+    def _cleanup_force(self, temp_path):
+        """强制删除方法"""
+        def remove_readonly(func, path, excinfo):
+            os.chmod(path, 0o777)
+            func(path)
+        
+        shutil.rmtree(temp_path, onerror=remove_readonly)
+    
+    def _cleanup_recursive(self, temp_path):
+        """递归删除方法"""
+        for root, dirs, files in os.walk(temp_path, topdown=False):
+            for name in files:
+                file_path = os.path.join(root, name)
+                try:
+                    os.chmod(file_path, 0o777)
+                    os.remove(file_path)
+                except Exception:
+                    pass
+            
+            for name in dirs:
+                dir_path = os.path.join(root, name)
+                try:
+                    os.chmod(dir_path, 0o777)
+                    os.rmdir(dir_path)
+                except Exception:
+                    pass
+        
+        try:
+            os.chmod(temp_path, 0o777)
+            os.rmdir(temp_path)
+        except Exception:
+            pass
+    
+    def _cleanup_command(self, temp_path):
+        """使用命令行删除"""
+        if sys.platform == 'win32':
+            subprocess.run(['cmd', '/c', 'rd', '/s', '/q', temp_path], 
+                         capture_output=True, shell=True)
+        else:
+            subprocess.run(['rm', '-rf', temp_path], 
+                         capture_output=True)
+    
+    def _schedule_cleanup(self, temp_path):
+        """创建延迟删除任务"""
+        if sys.platform == 'win32':
+            # Windows: 创建批处理文件并在启动时删除
+            bat_path = os.path.join(os.path.dirname(temp_path), 'cleanup_temp.bat')
+            with open(bat_path, 'w', encoding='gbk') as f:
+                f.write(f'@echo off\n')
+                f.write(f'ping 127.0.0.1 -n 3 > nul\n')
+                f.write(f'rd /s /q "{temp_path}"\n')
+                f.write(f'del "%~f0"\n')
+            
+            # 启动批处理文件
+            subprocess.Popen([bat_path], shell=True)
+        else:
+            # Linux/Mac: 使用at命令
+            try:
+                subprocess.run(['at', 'now', '+', '1', 'minute', 
+                              f'rm -rf {temp_path}'], 
+                             capture_output=True)
+            except Exception:
+                pass
 
 if __name__ == "__main__":
     import sys

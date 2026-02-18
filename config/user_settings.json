@@ -16,5 +16,5 @@
   "export_quality": "高",
   "export_threads": 1,
   "github_acceleration": true,
-  "use_proxy": false
+  "use_proxy": true
 }

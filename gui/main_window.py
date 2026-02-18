@@ -33,6 +33,9 @@ from gui.widgets.video_preview import VideoPreviewWidget
 from gui.widgets.transition_preview import TransitionPreviewWidget
 from gui.widgets.timeline import TimelineWidget
 from gui.widgets.json_preview import JsonPreviewWidget
+from core.auto_save_service import AutoSaveService, AutoSaveConfig
+from core.crash_recovery_service import CrashRecoveryService
+from core.error_handler import ErrorHandler, show_error
 
 
 class MainWindow(QMainWindow):
@@ -52,6 +55,24 @@ class MainWindow(QMainWindow):
         self._loop_in_out: tuple[int, int] = (0, 0)   # 循环视频的(入点, 出点)
         self._intro_in_out: tuple[int, int] = (0, 0)  # 入场视频的(入点, 出点)
         self._timeline_preview: Optional['VideoPreviewWidget'] = None  # 时间轴当前连接的预览器
+
+        # 初始化自动保存和崩溃恢复服务
+        self._auto_save_service = AutoSaveService()
+        self._crash_recovery_service = CrashRecoveryService()
+        self._crash_recovery_service.initialize(os.path.join(os.path.dirname(__file__), "..", ".recovery"))
+
+        # 初始化错误处理器
+        self._error_handler = ErrorHandler()
+        self._error_handler.error_occurred.connect(self._on_error_occurred)
+
+        # 撤销/重做历史
+        self._undo_stack = []
+        self._redo_stack = []
+        self._max_history = 50  # 最大历史记录数
+
+        # 最近打开的文件列表
+        self._recent_files = []
+        self._max_recent_files = 10  # 最多保留10个最近文件
 
         self._setup_ui()
         self._setup_menu()
@@ -81,6 +102,9 @@ class MainWindow(QMainWindow):
 
         # 启动时延迟检查更新（2秒后）
         QTimer.singleShot(2000, self._check_update_on_startup)
+
+        # 启动时检查崩溃恢复（3秒后）
+        QTimer.singleShot(3000, self._check_crash_recovery)
 
         logger.info("主窗口初始化完成")
         self._initializing = False  # 初始化完成
@@ -280,10 +304,11 @@ class MainWindow(QMainWindow):
         # 基础配置面板
         self.basic_config_panel = BasicConfigPanel()
         
-        # 默认显示高级配置面板
+        # 默认显示基础配置面板
         self.config_layout.addWidget(self.advanced_config_panel)
         self.config_layout.addWidget(self.basic_config_panel)
-        self.basic_config_panel.setVisible(False)
+        self.advanced_config_panel.setVisible(False)
+        self.basic_config_panel.setVisible(True)
         
         self.splitter.addWidget(self.config_container)
 
@@ -365,6 +390,17 @@ class MainWindow(QMainWindow):
         self.preview_tabs.addTab(self.video_preview, "循环视频")         # Tab 3
         preview_layout.addWidget(self.preview_tabs, stretch=1)
 
+        # 默认应用基础设置模式的标签页显示逻辑
+        # 隐藏不需要的标签页
+        for i in [0, 1, 2]:  # 0:入场视频, 1:截取帧编辑, 2:过渡图片
+            if i < self.preview_tabs.count():
+                self.preview_tabs.setTabVisible(i, False)
+        # 显示循环视频标签页
+        if 3 < self.preview_tabs.count():
+            self.preview_tabs.setTabVisible(3, True)
+        # 切换到循环视频标签页
+        self.preview_tabs.setCurrentIndex(3)
+
         self.timeline = TimelineWidget()
         preview_layout.addWidget(self.timeline)
 
@@ -405,6 +441,12 @@ class MainWindow(QMainWindow):
         self.action_open.setShortcut(QKeySequence.StandardKey.Open)
         file_menu.addAction(self.action_open)
 
+        # 最近打开的文件
+        self.recent_menu = file_menu.addMenu("最近打开(&R)")
+        self._update_recent_menu()
+
+        file_menu.addSeparator()
+
         self.action_save = QAction("保存(&S)", self)
         self.action_save.setShortcut(QKeySequence.StandardKey.Save)
         file_menu.addAction(self.action_save)
@@ -418,6 +460,19 @@ class MainWindow(QMainWindow):
         self.action_exit = QAction("退出(&X)", self)
         self.action_exit.setShortcut(QKeySequence.StandardKey.Quit)
         file_menu.addAction(self.action_exit)
+
+        # 编辑菜单
+        edit_menu = menubar.addMenu("编辑(&E)")
+
+        self.action_undo = QAction("撤销(&U)", self)
+        self.action_undo.setShortcut(QKeySequence.StandardKey.Undo)
+        self.action_undo.setEnabled(False)
+        edit_menu.addAction(self.action_undo)
+
+        self.action_redo = QAction("重做(&R)", self)
+        self.action_redo.setShortcut(QKeySequence.StandardKey.Redo)
+        self.action_redo.setEnabled(False)
+        edit_menu.addAction(self.action_redo)
 
         # 工具菜单
         tools_menu = menubar.addMenu("工具(&T)")
@@ -448,6 +503,8 @@ class MainWindow(QMainWindow):
         self.action_save.triggered.connect(self._on_save_project)
         self.action_save_as.triggered.connect(self._on_save_as)
         self.action_exit.triggered.connect(self.close)
+        self.action_undo.triggered.connect(self._on_undo)
+        self.action_redo.triggered.connect(self._on_redo)
         self.action_flasher.triggered.connect(self._on_flasher)
         self.action_shortcuts.triggered.connect(self._on_shortcuts)
         self.action_check_update.triggered.connect(self._on_check_update)
@@ -799,11 +856,15 @@ class MainWindow(QMainWindow):
         self._is_modified = False
 
         self.advanced_config_panel.set_config(self._config, self._base_dir)
+        self.basic_config_panel.set_config(self._config, self._base_dir)
         self.json_preview.set_config(self._config, self._base_dir)
         self.video_preview.set_epconfig(self._config)
         self._update_title()
         self.status_bar.showMessage("已创建临时项目，可以开始编辑")
         logger.info(f"已初始化临时项目: {temp_dir}")
+
+        # 启动自动保存服务（临时项目也支持自动保存）
+        self._auto_save_service.start(self._config, self._project_path, self._base_dir)
 
     def _cleanup_temp_dir(self):
         """清理临时项目目录"""
@@ -891,6 +952,7 @@ class MainWindow(QMainWindow):
 
         # 更新UI
         self.advanced_config_panel.set_config(self._config, self._base_dir)
+        self.basic_config_panel.set_config(self._config, self._base_dir)
         self.json_preview.set_config(self._config, self._base_dir)
         self.video_preview.set_epconfig(self._config)
         self._update_title()
@@ -967,8 +1029,14 @@ class MainWindow(QMainWindow):
             self._update_title()
             self.status_bar.showMessage(f"已打开: {path}")
 
+            # 添加到最近文件列表
+            self._add_recent_file(path)
+
+            # 启动自动保存服务
+            self._auto_save_service.start(self._config, self._project_path, self._base_dir)
+
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"打开文件失败:\n{e}")
+            show_error(e, "打开文件", self)
 
     def _on_save_project(self):
         """保存项目"""
@@ -985,7 +1053,7 @@ class MainWindow(QMainWindow):
             self._update_title()
             self.status_bar.showMessage(f"已保存: {self._project_path}")
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"保存失败:\n{e}")
+            show_error(e, "保存项目", self)
 
     def _on_save_as(self):
         """另存为"""
@@ -1019,7 +1087,7 @@ class MainWindow(QMainWindow):
             self._update_title()
             self.status_bar.showMessage(f"已保存: {path}")
         except Exception as e:
-            QMessageBox.critical(self, "错误", f"保存失败:\n{e}")
+            show_error(e, "另存为", self)
 
     def _on_validate(self):
         """验证配置"""
@@ -1093,7 +1161,7 @@ class MainWindow(QMainWindow):
             export_data = self._collect_export_data()
         except Exception as e:
             logger.error(f"收集导出数据失败: {e}")
-            QMessageBox.critical(self, "错误", f"收集导出数据失败:\n{e}")
+            show_error(e, "收集导出数据", self)
             return
 
         # 处理arknights叠加的自定义图片
@@ -1101,7 +1169,7 @@ class MainWindow(QMainWindow):
             self._process_arknights_custom_images(dir_path)
         except Exception as e:
             logger.error(f"处理自定义图片失败: {e}")
-            QMessageBox.warning(self, "警告", f"处理自定义图片失败:\n{e}\n\n将继续导出其他内容。")
+            show_error(e, "处理自定义图片", self)
 
         # 处理 ImageOverlay 路径
         try:
@@ -1220,7 +1288,7 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             logger.error(f"启动模拟器失败: {e}")
-            QMessageBox.critical(self, "错误", f"启动模拟器失败:\n{e}")
+            show_error(e, "启动模拟器", self)
 
     def _on_flasher(self):
         """启动固件烧录工具"""
@@ -1236,7 +1304,7 @@ class MainWindow(QMainWindow):
             logger.info("固件烧录对话框已启动")
         except Exception as e:
             logger.error(f"启动烧录工具失败: {e}")
-            QMessageBox.critical(self, "错误", f"启动烧录工具失败:\n{e}")
+            show_error(e, "启动烧录工具", self)
 
     def _on_about(self):
         """关于"""
@@ -1247,6 +1315,136 @@ class MainWindow(QMainWindow):
             f"<p>明日方舟通行证素材制作器</p>"
             f"<p>作者: Rafael_ban & 初微弦音 & 涙不在为你而流</p>"
         )
+
+    def _update_recent_menu(self):
+        """更新最近打开的文件菜单"""
+        self.recent_menu.clear()
+
+        if not self._recent_files:
+            action = QAction("无最近文件", self)
+            action.setEnabled(False)
+            self.recent_menu.addAction(action)
+            return
+
+        for i, file_path in enumerate(self._recent_files):
+            action = QAction(f"{i+1}. {file_path}", self)
+            action.setData(file_path)
+            action.triggered.connect(lambda checked, path=file_path: self._on_open_recent_file(path))
+            self.recent_menu.addAction(action)
+
+        self.recent_menu.addSeparator()
+
+        clear_action = QAction("清空最近文件", self)
+        clear_action.triggered.connect(self._clear_recent_files)
+        self.recent_menu.addAction(clear_action)
+
+    def _on_open_recent_file(self, file_path: str):
+        """打开最近文件"""
+        if os.path.exists(file_path):
+            self._load_project(file_path)
+        else:
+            QMessageBox.warning(
+                self,
+                "文件不存在",
+                f"文件不存在:\n{file_path}\n\n将从最近文件列表中移除。"
+            )
+            self._recent_files.remove(file_path)
+            self._update_recent_menu()
+
+    def _clear_recent_files(self):
+        """清空最近文件列表"""
+        self._recent_files.clear()
+        self._update_recent_menu()
+
+    def _add_recent_file(self, file_path: str):
+        """添加文件到最近打开列表"""
+        if file_path in self._recent_files:
+            self._recent_files.remove(file_path)
+
+        self._recent_files.insert(0, file_path)
+
+        if len(self._recent_files) > self._max_recent_files:
+            self._recent_files.pop()
+
+        self._update_recent_menu()
+
+    def _on_undo(self):
+        """撤销操作"""
+        if not self._undo_stack:
+            return
+
+        # 获取上一个状态
+        prev_state = self._undo_stack.pop()
+
+        # 保存当前状态到重做栈
+        current_state = self._config.to_dict() if self._config else {}
+        self._redo_stack.append(current_state)
+
+        # 恢复上一个状态
+        if prev_state:
+            self._config = EPConfig.from_dict(prev_state)
+            self._update_ui_from_config()
+
+        # 更新按钮状态
+        self.action_undo.setEnabled(len(self._undo_stack) > 0)
+        self.action_redo.setEnabled(len(self._redo_stack) > 0)
+
+        self.status_bar.showMessage("已撤销", 2000)
+
+    def _on_redo(self):
+        """重做操作"""
+        if not self._redo_stack:
+            return
+
+        # 获取下一个状态
+        next_state = self._redo_stack.pop()
+
+        # 保存当前状态到撤销栈
+        current_state = self._config.to_dict() if self._config else {}
+        self._undo_stack.append(current_state)
+
+        # 恢复下一个状态
+        if next_state:
+            self._config = EPConfig.from_dict(next_state)
+            self._update_ui_from_config()
+
+        # 更新按钮状态
+        self.action_undo.setEnabled(len(self._undo_stack) > 0)
+        self.action_redo.setEnabled(len(self._redo_stack) > 0)
+
+        self.status_bar.showMessage("已重做", 2000)
+
+    def _save_state(self):
+        """保存当前状态到撤销栈"""
+        if not self._config:
+            return
+
+        current_state = self._config.to_dict()
+        self._undo_stack.append(current_state)
+
+        # 限制历史记录数量
+        if len(self._undo_stack) > self._max_history:
+            self._undo_stack.pop(0)
+
+        # 清空重做栈
+        self._redo_stack.clear()
+
+        # 更新按钮状态
+        self.action_undo.setEnabled(len(self._undo_stack) > 0)
+        self.action_redo.setEnabled(False)
+
+    def _update_ui_from_config(self):
+        """从配置更新UI"""
+        if not self._config:
+            return
+
+        self.advanced_config_panel.set_config(self._config, self._base_dir)
+        self.basic_config_panel.set_config(self._config, self._base_dir)
+        self.json_preview.set_config(self._config, self._base_dir)
+        self.video_preview.set_epconfig(self._config)
+
+        self._is_modified = True
+        self._update_title()
 
     def _on_sidebar_firmware(self):
         """侧边栏：固件烧录"""
@@ -2310,7 +2508,7 @@ class MainWindow(QMainWindow):
             file_menu.exec(pos)
         except Exception as e:
             logger.error(f"文件菜单错误: {e}")
-            QMessageBox.warning(self, "错误", f"文件菜单加载失败: {str(e)}")
+            show_error(e, "文件菜单", self)
     
     def _on_nav_basic(self):
         """顶部导航：基础设置"""
@@ -2323,6 +2521,18 @@ class MainWindow(QMainWindow):
                 self.advanced_config_panel.setVisible(False)
                 self.basic_config_panel.setVisible(True)
                 self.status_bar.showMessage("基础设置模式 - 简化界面")
+            
+            # 基础模式下，只显示循环视频标签页
+            if hasattr(self, 'preview_tabs'):
+                # 隐藏不需要的标签页
+                for i in [0, 1, 2]:  # 0:入场视频, 1:截取帧编辑, 2:过渡图片
+                    if i < self.preview_tabs.count():
+                        self.preview_tabs.setTabVisible(i, False)
+                # 显示循环视频标签页
+                if 3 < self.preview_tabs.count():
+                    self.preview_tabs.setTabVisible(3, True)
+                # 切换到循环视频标签页
+                self.preview_tabs.setCurrentIndex(3)
         except Exception as e:
             logger.error(f"基础设置切换错误: {e}")
 
@@ -2337,6 +2547,11 @@ class MainWindow(QMainWindow):
                 self.advanced_config_panel.setVisible(True)
                 self.basic_config_panel.setVisible(False)
                 self.status_bar.showMessage("高级设置模式 - 完整界面")
+            
+            # 高级模式下，显示所有标签页
+            if hasattr(self, 'preview_tabs'):
+                for i in range(self.preview_tabs.count()):
+                    self.preview_tabs.setTabVisible(i, True)
         except Exception as e:
             logger.error(f"高级设置切换错误: {e}")
 
@@ -2557,6 +2772,49 @@ class MainWindow(QMainWindow):
         # 记录检查时间
         settings.setValue("last_update_check", datetime.now().isoformat())
 
+    def _check_crash_recovery(self):
+        """启动时检查崩溃恢复"""
+        try:
+            # 检查是否有可恢复的项目
+            recovery_list = self._crash_recovery_service.check_crash_recovery()
+
+            if not recovery_list:
+                logger.info("没有发现可恢复的项目")
+                return
+
+            # 显示崩溃恢复对话框
+            from gui.dialogs.crash_recovery_dialog import CrashRecoveryDialog
+
+            dialog = CrashRecoveryDialog(self._crash_recovery_service, self)
+            dialog.recovery_requested.connect(self._on_recovery_requested)
+
+            result = dialog.exec()
+
+            if result == QDialog.DialogCode.Accepted:
+                logger.info("崩溃恢复对话框已关闭")
+
+        except Exception as e:
+            logger.error(f"检查崩溃恢复失败: {e}")
+
+    def _on_recovery_requested(self, recovery_info, target_path):
+        """恢复项目请求"""
+        try:
+            # 打开恢复的项目
+            self._load_project(target_path)
+
+            # 清理旧的恢复信息
+            self._crash_recovery_service.cleanup_old_recoveries(max_age_hours=24)
+
+            logger.info(f"项目已恢复: {target_path}")
+
+        except Exception as e:
+            logger.error(f"恢复项目失败: {e}")
+            show_error(e, "恢复项目", self)
+
+    def _on_error_occurred(self, error_info):
+        """错误发生时的处理"""
+        self.status_bar.showMessage(f"错误: {error_info.user_message}", 5000)
+
     def _on_startup_update_check_completed(self, release_info):
         """启动时更新检查完成"""
         if release_info:
@@ -2597,12 +2855,53 @@ class MainWindow(QMainWindow):
     def _on_video_file_selected(self, path: str):
         """视频文件被选择"""
         logger.info(f"视频文件被选择: {path}")
-        if path and os.path.exists(path):
-            self.video_preview.load_video(path)
-            # 切换到循环视频标签页
-            self.preview_tabs.setCurrentIndex(3)
+        
+        # 检查路径是否存在
+        import os
+        path_exists = os.path.exists(path)
+        logger.info(f"路径存在检查: {path_exists}")
+        
+        # 尝试使用不同的编码方式检查路径
+        try:
+            # 尝试使用原始路径
+            path_exists_raw = os.path.exists(path)
+            logger.info(f"原始路径检查: {path_exists_raw}")
+            
+            # 尝试使用 Unicode 路径
+            if isinstance(path, str):
+                path_exists_unicode = os.path.exists(path)
+                logger.info(f"Unicode 路径检查: {path_exists_unicode}")
+        except Exception as e:
+            logger.error(f"路径检查出错: {e}")
+        
+        if path:
+            # 即使路径检查失败，也尝试加载文件
+            logger.info("尝试加载文件...")
+            try:
+                # 检查文件类型
+                ext = os.path.splitext(path)[1].lower()
+                image_extensions = [".jpg", ".jpeg", ".png", ".bmp", ".gif"]
+                
+                if ext in image_extensions:
+                    # 加载图片
+                    logger.info("加载图片文件...")
+                    self.video_preview.load_static_image_from_file(path)
+                else:
+                    # 加载视频
+                    logger.info("加载视频文件...")
+                    self.video_preview.load_video(path)
+                
+                # 检查是否在基础模式下
+                if hasattr(self, 'basic_config_panel') and self.basic_config_panel.isVisible():
+                    # 基础模式下，不自动切换标签页，保持在当前标签页
+                    logger.info("基础模式下，不自动切换标签页")
+                else:
+                    # 高级模式下，切换到循环视频标签页
+                    self.preview_tabs.setCurrentIndex(3)
+            except Exception as e:
+                logger.error(f"加载文件出错: {e}")
         else:
-            logger.warning(f"视频文件不存在: {path}")
+            logger.warning(f"视频文件路径为空")
 
     def _on_intro_video_selected(self, path: str):
         """入场视频文件被选择"""
@@ -2930,6 +3229,34 @@ class MainWindow(QMainWindow):
             self.timeline.set_rotation(preview.get_rotation())
             self.timeline.set_playing(preview.is_playing)
 
+        # 连接帧变更信号
+        try:
+            preview.frame_changed.disconnect(self._on_video_frame_changed)
+        except TypeError:
+            pass
+        preview.frame_changed.connect(self._on_video_frame_changed)
+
+    def _on_video_frame_changed(self, frame):
+        """视频帧变更时更新截取帧编辑页面"""
+        # 如果当前在截取帧编辑标签页，自动更新图片
+        if self.preview_tabs.currentIndex() == 1 and hasattr(self, '_current_video_preview'):
+            source_preview = self._current_video_preview
+            frame = source_preview.current_frame
+            if frame is not None:
+                import cv2
+                # 应用旋转变换
+                frame = frame.copy()
+                rotation = source_preview.get_rotation()
+                if rotation == 90:
+                    frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+                elif rotation == 180:
+                    frame = cv2.rotate(frame, cv2.ROTATE_180)
+                elif rotation == 270:
+                    frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                # 更新截取帧编辑页面的图片
+                self.frame_capture_preview.load_static_image_from_array(frame)
+                logger.info(f"更新截取帧编辑页面，帧: {source_preview.current_frame_index}")
+
     def _on_preview_tab_changed(self, index: int):
         """预览标签页切换"""
         # 保存当前 in/out 到正确的位置（基于当前连接的预览器）
@@ -2948,7 +3275,14 @@ class MainWindow(QMainWindow):
             self.timeline.show()
             logger.debug("切换到入场视频预览")
         elif index == 1:
-            # 截取帧编辑 - 保持时间轴可见以便导航视频选帧
+            # 截取帧编辑 - 连接时间轴到保存的视频预览器（如果有）
+            if hasattr(self, '_current_video_preview') and self._current_video_preview:
+                logger.debug("连接时间轴到保存的视频预览器")
+                self._connect_timeline_to_preview(self._current_video_preview)
+            else:
+                # 如果没有保存的预览器，连接到默认的预览器
+                logger.debug("连接时间轴到默认视频预览器")
+                self._connect_timeline_to_preview(self.video_preview)
             self.timeline.show()
             logger.debug("切换到截取帧编辑")
         elif index == 2:
@@ -3159,25 +3493,39 @@ class MainWindow(QMainWindow):
 
     def _on_capture_frame(self):
         """截取当前视频帧 → 加载到截取帧编辑标签页"""
+        logger.info("开始截取视频帧")
+        
         if not self._base_dir:
+            logger.warning("_base_dir 不存在，显示警告")
             QMessageBox.warning(self, "警告", "请先创建或打开项目")
             return
 
         # 尝试从当前活跃的视频预览获取帧
         current_tab = self.preview_tabs.currentIndex()
+        logger.info(f"当前标签页: {current_tab}")
+        
         if current_tab == 3:
             source_preview = self.video_preview
         else:
             source_preview = self.intro_preview
+        
+        logger.info(f"选择视频预览器: {type(source_preview).__name__}")
 
         frame = source_preview.current_frame
+        logger.info(f"当前帧: {frame}")
+        
         if frame is None:
             # 尝试另一个预览
+            logger.info("当前帧为 None，尝试另一个预览器")
             other = self.video_preview if source_preview is self.intro_preview else self.intro_preview
             frame = other.current_frame
+            logger.info(f"另一个预览器的当前帧: {frame}")
             if other.current_frame is not None:
                 source_preview = other
+                logger.info(f"切换到另一个预览器: {type(source_preview).__name__}")
+        
         if frame is None:
+            logger.warning("所有预览器的当前帧都为 None，显示警告")
             QMessageBox.warning(self, "警告", "请先加载视频")
             return
 
@@ -3186,6 +3534,8 @@ class MainWindow(QMainWindow):
         # 应用旋转变换（不裁切，交给用户在截取帧编辑标签页中操作）
         frame = frame.copy()
         rotation = source_preview.get_rotation()
+        logger.info(f"旋转变换: {rotation}度")
+        
         if rotation == 90:
             frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
         elif rotation == 180:
@@ -3194,48 +3544,93 @@ class MainWindow(QMainWindow):
             frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
 
         # 加载到截取帧编辑预览
+        logger.info(f"加载到截取帧编辑预览，帧尺寸: {frame.shape}")
         self.frame_capture_preview.load_static_image_from_array(frame)
+        
+        # 保存当前的视频预览器引用，用于时间轴控制
+        self._current_video_preview = source_preview
+        
+        # 连接时间轴到原始的视频预览器，而不是静态图片预览器
+        logger.info("连接时间轴到原始视频预览器")
+        self._connect_timeline_to_preview(source_preview)
+        
         # 切换到截取帧编辑标签页
+        logger.info("切换到截取帧编辑标签页")
         self.preview_tabs.setCurrentIndex(1)
+        
+        logger.info("截取视频帧完成")
         self.status_bar.showMessage("已截取视频帧，请调整裁切框后点击\"保存为图标\"")
 
     def _on_save_captured_icon(self):
         """从截取帧编辑的 cropbox 保存图标"""
+        logger.info("开始保存图标")
+        
         if not self._base_dir:
+            logger.warning("_base_dir 不存在，显示警告")
             QMessageBox.warning(self, "警告", "请先创建或打开项目")
             return
 
         frame = self.frame_capture_preview.current_frame
+        logger.info(f"当前帧: {frame}")
+        
         if frame is None:
+            logger.warning("当前帧为 None，显示警告")
             QMessageBox.warning(self, "警告", "请先截取视频帧")
             return
 
-        import cv2
+        try:
+            import cv2
 
-        x, y, w, h = self.frame_capture_preview.get_cropbox()
+            # 获取裁剪框
+            cropbox = self.frame_capture_preview.get_cropbox()
+            logger.info(f"裁剪框: {cropbox}")
+            
+            if len(cropbox) != 4:
+                logger.error(f"裁剪框格式错误: {cropbox}")
+                QMessageBox.warning(self, "错误", "裁剪框格式错误")
+                return
+            
+            x, y, w, h = cropbox
 
-        # 边界检查
-        frame_h, frame_w = frame.shape[:2]
-        x = max(0, min(x, frame_w - 1))
-        y = max(0, min(y, frame_h - 1))
-        w = min(w, frame_w - x)
-        h = min(h, frame_h - y)
+            # 边界检查
+            frame_h, frame_w = frame.shape[:2]
+            logger.info(f"帧尺寸: {frame_w}x{frame_h}")
+            
+            x = max(0, min(x, frame_w - 1))
+            y = max(0, min(y, frame_h - 1))
+            w = min(w, frame_w - x)
+            h = min(h, frame_h - y)
+            
+            logger.info(f"调整后的裁剪框: x={x}, y={y}, w={w}, h={h}")
 
-        if w <= 0 or h <= 0:
-            QMessageBox.warning(self, "错误", "裁切区域无效")
-            return
+            if w <= 0 or h <= 0:
+                logger.warning("裁切区域无效")
+                QMessageBox.warning(self, "错误", "裁切区域无效")
+                return
 
-        cropped = frame[y:y+h, x:x+w]
+            # 裁剪帧
+            logger.info("开始裁剪帧")
+            cropped = frame[y:y+h, x:x+w]
+            logger.info(f"裁剪后的尺寸: {cropped.shape}")
 
-        icon_path = os.path.join(self._base_dir, "icon.png")
-        success, encoded = cv2.imencode('.png', cropped)
-        if success:
-            with open(icon_path, 'wb') as f:
-                f.write(encoded.tobytes())
-            self.config_panel.edit_icon.setText("icon.png")
-            self.status_bar.showMessage("已保存图标")
-        else:
-            QMessageBox.warning(self, "错误", "保存图标失败")
+            # 保存图标
+            icon_path = os.path.join(self._base_dir, "icon.png")
+            logger.info(f"保存图标到: {icon_path}")
+            
+            success, encoded = cv2.imencode('.png', cropped)
+            if success:
+                with open(icon_path, 'wb') as f:
+                    f.write(encoded.tobytes())
+                self.advanced_config_panel.edit_icon.setText("icon.png")
+                self.status_bar.showMessage("已保存图标")
+                logger.info("图标保存成功")
+            else:
+                logger.error("保存图标失败")
+                QMessageBox.warning(self, "错误", "保存图标失败")
+                
+        except Exception as e:
+            logger.error(f"保存图标时发生错误: {e}", exc_info=True)
+            QMessageBox.critical(self, "错误", f"保存图标时发生错误: {str(e)}")
 
     def _collect_export_data(self) -> dict:
         """收集导出所需的数据"""
@@ -3473,6 +3868,10 @@ class MainWindow(QMainWindow):
         if self._check_save():
             self._save_settings()
             self._cleanup_temp_dir()
+            
+            # 停止自动保存服务
+            self._auto_save_service.stop()
+            
             event.accept()
         else:
             event.ignore()

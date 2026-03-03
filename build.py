@@ -127,6 +127,12 @@ def clean_build():
 def run_cxfreeze(skip_flasher=False):
     """执行 cx_Freeze 打包"""
 
+    # 确保项目根目录在 Python 路径中（支持 --no-install-project 模式）
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    if project_root not in sys.path:
+        sys.path.insert(0, project_root)
+    print(f"Project root: {project_root}")
+
     # 强制清理 __pycache__，确保使用最新源代码编译
     print("Clearing __pycache__ before build...")
     for root, dirs, files in os.walk('.'):
@@ -151,8 +157,6 @@ def run_cxfreeze(skip_flasher=False):
         "platformdirs",
         "fido2", "fido2.hid", "fido2.client", "fido2.webauthn",
         "usb", "usb.core", "usb.backend", "usb.backend.libusb1",
-        "gui", "gui.dialogs", "gui.widgets",
-        "core", "config", "utils",
     ]
 
     includes = [

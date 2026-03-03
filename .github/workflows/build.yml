@@ -102,6 +102,10 @@ jobs:
           choco install innosetup -y
         shell: pwsh
 
+      - name: Set PYTHONPATH
+        run: echo "PYTHONPATH=$env:GITHUB_WORKSPACE" >> $env:GITHUB_ENV
+        shell: pwsh
+
       - name: Build with cx_Freeze and Inno Setup
         run: uv run python build.py --skip-flasher
 

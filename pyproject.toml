@@ -28,3 +28,6 @@ dependencies = [
 dev = [
     "cx_Freeze>=6.15.0",
 ]
+
+[tool.uv]
+constraint-dependencies = ["pyqt5-qt5<=5.15.2"]

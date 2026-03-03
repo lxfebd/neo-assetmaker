@@ -242,6 +242,13 @@ def run_cxfreeze(skip_flasher=False):
     else:
         print("  Warning: epass_flasher/bin/ not found (skipped due to --skip-flasher)")
 
+    # 添加本地模块目录（确保 cx_Freeze 能找到）
+    local_modules = ["gui", "core", "config", "utils", "_mext"]
+    for module in local_modules:
+        if os.path.exists(module):
+            include_files.append((module, module))
+            print(f"  Including local module: {module}")
+
     pyqt6_plugins = os.path.join(site_packages, "PyQt6", "Qt6", "plugins")
     if os.path.exists(pyqt6_plugins):
         for plugin in ["platforms", "imageformats", "styles"]:
